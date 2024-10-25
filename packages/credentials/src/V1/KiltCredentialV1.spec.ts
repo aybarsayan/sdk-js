@@ -28,8 +28,13 @@ it('exports to VC including ctype as schema', async () => {
   expect(() => validateStructure(VC)).not.toThrow()
 })
 
-it('it verifies valid claim against schema', async () => {
-  await expect(validateSubject(VC, { cTypes: [cType] })).resolves.not.toThrow()
+it('it verifies valid claim against nested schema', async () => {
+  await expect(
+    validateSubject(VC, { 
+      cTypes: [cType], 
+      nestedCType: cType 
+    })
+  ).resolves.not.toThrow()
 })
 
 it('it detects schema violations', async () => {

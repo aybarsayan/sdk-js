@@ -336,6 +336,7 @@ const cachingCTypeLoader = newCachingCTypeLoader()
  * @param options Options map.
  * @param options.cTypes One or more CType definitions to be used for validation. If `loadCTypes` is set to `false`, validation will fail if the definition of the credential's CType is not given.
  * @param options.loadCTypes A function to load CType definitions that are not in `cTypes`. Defaults to using the {@link newCachingCTypeLoader | CachingCTypeLoader}. If set to `false` or `undefined`, no additional CTypes will be loaded.
+ * @param options.nestedCType - If provided, validates using nested CType validation with this CType.
  */
 export async function validateSubject(
   {
@@ -345,7 +346,12 @@ export async function validateSubject(
   {
     cTypes = [],
     loadCTypes = cachingCTypeLoader,
-  }: { cTypes?: ICType[]; loadCTypes?: false | CTypeLoader } = {}
+    nestedCType = null, // Changed to ICType | null with null default
+  }: { 
+    cTypes?: ICType[]; 
+    loadCTypes?: false | CTypeLoader;
+    nestedCType?: ICType | null; // Type definition updated
+  } = {}
 ): Promise<void> {
   // get CType id referenced in credential
   const credentialsCTypeId = type.find((str) =>
@@ -385,6 +391,16 @@ export async function validateSubject(
       [key.substring(vocab.length)]: value,
     }
   }, {})
-  // validates against CType (also validates CType schema itself)
-  CType.verifyClaimAgainstSchema(claims, cType)
+
+  // Check if nestedCType is provided and perform appropriate validation
+  if (nestedCType) {
+    await CType.verifyClaimAgainstNestedSchemas(
+      nestedCType,
+      cTypes,
+      claims
+    )
+  } else {
+    // Regular validation
+    await CType.verifyClaimAgainstSchema(claims, cType)
+  }
 }
