@@ -370,6 +370,24 @@ async function runAll() {
 
   console.log('Did deactivated')
 
+// ┏━━━━━━━━━━━━━━━━━━┓
+// ┃ Revoke credential┃
+// ┗━━━━━━━━━━━━━━━━━━┛
+//
+// Revoke a previously issued credential on chain
+const revokeCredentialResult = await Kilt.Issuer.revoke(
+  didDocument.id, 
+  submitter,
+  signers,
+  credential
+ )
+ 
+ if (!revokeCredentialResult.success) {
+  throw new Error(`revoke credential failed: ${revokeCredentialResult.error?.join(', ')}`)
+ }
+ 
+ console.log('credential revoked')
+ 
   // Release the connection to the blockchain.
   await api.disconnect()
 

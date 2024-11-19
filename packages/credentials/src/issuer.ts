@@ -15,6 +15,16 @@ import type { CTypeLoader } from './ctype/index.js'
 import type { IssuerOptions, SubmitOverride } from './interfaces.js'
 
 export type { IssuerOptions }
+import * as Kilt from '@kiltprotocol/sdk-js'
+import * as KiltChain from '@kiltprotocol/chain-helpers'
+import type {
+  KiltAddress,
+  SignerInterface,
+  KeyringPair,
+  DidUrl,
+} from '@kiltprotocol/types'
+import {authorizeTx} from "@kiltprotocol/did"
+import { base58Decode } from '@polkadot/util-crypto'
 
 /**
  * Creates a new credential document as a basis for issuing a credential.
@@ -133,4 +143,65 @@ export async function issue({
         `Only proof type ${KiltAttestationProofV1.PROOF_TYPE} is currently supported.`
       )
   }
+}
+
+/**
+* Revokes a Kilt credential on the blockchain, making it invalid.
+* 
+* @param attester The DID URL of the attester revoking the credential
+* @param submitterAccount The account that will submit and pay for the transaction
+* @param signCallback Callback function to sign the DID authorization 
+* @param credential The Verifiable Credential to be revoked
+* @returns An object containing:
+* - success: Boolean indicating if revocation was successful
+* - error?: Array of error messages if revocation failed
+* - info: Object containing blockchain transaction details:
+*   - blockNumber?: Block number where transaction was included
+*   - blockHash?: Hash of the block
+*   - transactionHash?: Hash of the transaction
+*/
+export async function revoke(
+  attester: DidUrl,
+  submitterAccount: KeyringPair,
+  signCallback: any,
+  credential: VerifiableCredential,
+ ): Promise<{success: boolean, error?: Array<string>, info: {blockNumber?: string, blockHash?: string, transactionHash?: string}}> {
+  try {
+    const api = Kilt.ConfigService.get('api')
+    const rootHash = credential.id?.split(':').pop()!
+    const decodedroothash = base58Decode(rootHash);
+    
+    const revokeTx = api.tx.attestation.revoke(decodedroothash, null) as any
+    const [submitter] = (await Kilt.getSignersForKeypair({
+          keypair: submitterAccount,
+          type: 'Ed25519',
+    })) as Array<SignerInterface<'Ed25519', KiltAddress>>
+ 
+    const authorizedTx = await authorizeTx(
+      attester,
+      revokeTx,
+      signCallback,
+      submitter.id
+    )
+    
+    const response = await KiltChain.Blockchain.signAndSubmitTx(authorizedTx, submitterAccount) as Object
+    const responseObj = JSON.parse(JSON.stringify(response));
+ 
+    return {
+      success: true,
+      info: {
+        blockNumber: responseObj.blockNumber,
+        blockHash: responseObj.status.finalized,
+        transactionHash: responseObj.txHash
+      }
+    }
+    
+  } catch (error: unknown) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+    return {
+      success: false,
+      error: [errorMessage],
+      info: {}
+    }
+ }
 }
