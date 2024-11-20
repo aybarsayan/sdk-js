@@ -7,6 +7,7 @@
 
 import { hexToU8a } from '@polkadot/util'
 import { base58Encode } from '@polkadot/util-crypto'
+import * as Kilt from "@kiltprotocol/sdk-js"
 
 import { JsonSchema, SDKErrors } from '@kiltprotocol/utils'
 import type {
@@ -327,15 +328,76 @@ export function fromInput({
 
 const cachingCTypeLoader = newCachingCTypeLoader()
 
+// Helper function to check if CType is nested
+function cTypeTypeFinder(cType: ICType): boolean {
+  function hasRef(obj: any): boolean {
+    if (typeof obj !== 'object' || obj === null) return false
+    
+    if ('$ref' in obj) return true
+    
+    return Object.values(obj).some(value => {
+      if (Array.isArray(value)) {
+        return value.some(item => hasRef(item))
+      }
+      if (typeof value === 'object') {
+        return hasRef(value)
+      }
+      return false
+    })
+  }
+  return hasRef(cType.properties)
+}
+
+// Helper function to extract unique references from CType
+function extractUniqueReferences(cType: ICType): Set<string> {
+  const references = new Set<string>()
+  
+  function processValue(value: any) {
+      if (typeof value !== 'object' || value === null) return
+      
+      if ('$ref' in value) {
+          const ref = value['$ref']
+          // Extract KILT CType reference
+          if (ref.startsWith('kilt:ctype:')) {
+              // Get first part split by #/
+              const baseRef = ref.split('#/')[0]
+              references.add(baseRef)
+          }
+      }
+      
+      // Check all values of the object recursively
+      Object.values(value).forEach(v => processValue(v))
+  }
+  
+  processValue(cType.properties)
+  return references
+}
+
+
 /**
  * Validates the claims in the VC's `credentialSubject` against a CType definition.
+ * Supports both nested and non-nested CType validation.
+ *
+ * For non-nested CTypes:
+ * - Validates claims directly against the CType schema
+ * 
+ * For nested CTypes:
+ * - Automatically detects nested structure through $ref properties
+ * - Fetches referenced CTypes from the blockchain
+ * - Performs validation against the main CType and all referenced CTypes
  *
  * @param credential A {@link KiltCredentialV1} type verifiable credential.
  * @param credential.credentialSubject The credentialSubject to be validated.
  * @param credential.type The credential's types.
  * @param options Options map.
- * @param options.cTypes One or more CType definitions to be used for validation. If `loadCTypes` is set to `false`, validation will fail if the definition of the credential's CType is not given.
- * @param options.loadCTypes A function to load CType definitions that are not in `cTypes`. Defaults to using the {@link newCachingCTypeLoader | CachingCTypeLoader}. If set to `false` or `undefined`, no additional CTypes will be loaded.
+ * @param options.cTypes One or more CType definitions to be used for validation. If loadCTypes is set to false, validation will fail if the definition of the credential's CType is not given.
+ * @param options.loadCTypes A function to load CType definitions that are not in cTypes. Defaults to using the {@link newCachingCTypeLoader | CachingCTypeLoader}. If set to false or undefined, no additional CTypes will be loaded.
+ * 
+ * @throws {Error} If the credential type does not contain a valid CType id
+ * @throws {Error} If required CType definitions cannot be loaded
+ * @throws {Error} If claims do not follow the expected CType format
+ * @throws {Error} If referenced CTypes in nested structure cannot be fetched from the blockchain
+ * @throws {Error} If validation fails against the CType schema
  */
 export async function validateSubject(
   {
@@ -344,7 +406,7 @@ export async function validateSubject(
   }: Pick<KiltCredentialV1, 'credentialSubject' | 'type'>,
   {
     cTypes = [],
-    loadCTypes = cachingCTypeLoader,
+    loadCTypes = newCachingCTypeLoader(),
   }: { cTypes?: ICType[]; loadCTypes?: false | CTypeLoader } = {}
 ): Promise<void> {
   // get CType id referenced in credential
@@ -354,6 +416,7 @@ export async function validateSubject(
   if (!credentialsCTypeId) {
     throw new Error('credential type does not contain a valid CType id')
   }
+
   // check that we have access to the right schema
   let cType = cTypes?.find(({ $id }) => $id === credentialsCTypeId)
   if (!cType) {
@@ -385,6 +448,43 @@ export async function validateSubject(
       [key.substring(vocab.length)]: value,
     }
   }, {})
-  // validates against CType (also validates CType schema itself)
-  CType.verifyClaimAgainstSchema(claims, cType)
+
+  // Connect to blockchain
+  const api = Kilt.ConfigService.get('api')
+
+  // Bizim eklediğimiz doğrulama mantığı
+  const isNested = cTypeTypeFinder(cType)
+  
+  if (!isNested) {
+    await CType.verifyClaimAgainstNestedSchemas(
+      cType,
+      [],
+      claims
+    )
+  } else {
+    const references = extractUniqueReferences(cType)
+    const referencedCTypes: ICType[] = []
+    
+    for (const ref of references) {
+      try {
+        const referencedCType = await CType.fetchFromChain(ref as any)
+        if (referencedCType.cType) {
+          referencedCTypes.push(referencedCType.cType)
+        }
+      } catch (error) {
+        console.error(`Failed to fetch CType for reference ${ref}:`, error)
+        throw new Error(`Failed to fetch CType from chain: ${ref}`)
+      }
+    }
+
+    if (referencedCTypes.length === references.size) {
+      await CType.verifyClaimAgainstNestedSchemas(
+        cType,
+        referencedCTypes,
+        claims
+      )
+    } else {
+      throw new Error("Some referenced CTypes could not be fetched")
+    }
+  }
 }
