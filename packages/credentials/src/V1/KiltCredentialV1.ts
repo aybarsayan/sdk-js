@@ -338,15 +338,15 @@ const hasRef = (value: unknown): boolean => {
   }
 
   if (Array.isArray(value)) {
-    return value.some(item => hasRef(item))
+    return value.some((item) => hasRef(item))
   }
 
-  return Object.values(value as Record<string, unknown>).some(v => hasRef(v))
+  return Object.values(value as Record<string, unknown>).some((v) => hasRef(v))
 }
 
 // Single function to both check for references and extract them
 function extractUniqueReferences(
-  cType: ICType, 
+  cType: ICType,
   references: Set<string> = new Set<string>()
 ): Set<string> {
   if (typeof cType?.properties !== 'object' || cType.properties === null) {
@@ -357,11 +357,9 @@ function extractUniqueReferences(
     if (typeof value !== 'object' || value === null) {
       return
     }
-
-    const objValue = value as Record<string, unknown>
-    
+    const objValue = value as Record<string, unknown>    
     if ('$ref' in objValue) {
-      const ref = objValue['$ref'] as string
+      const ref = objValue.$ref as string
       if (ref.startsWith('kilt:ctype:')) {
         references.add(ref.split('#/')[0])
       }
@@ -378,18 +376,15 @@ function extractUniqueReferences(
   return references
 }
 
-
 /**
  * Validates the claims in the VC's `credentialSubject` against a CType definition.
  * Supports both nested and non-nested CType validation.
- *
  * For non-nested CTypes:
- * - Validates claims directly against the CType schema
- * 
+ * - Validates claims directly against the CType schema.
  * For nested CTypes:
- * - Automatically detects nested structure through $ref properties
- * - Fetches referenced CTypes from the blockchain
- * - Performs validation against the main CType and all referenced CTypes
+ * - Automatically detects nested structure through $ref properties.
+ * - Fetches referenced CTypes from the blockchain.
+ * - Performs validation against the main CType and all referenced CTypes.
  *
  * @param credential A {@link KiltCredentialV1} type verifiable credential.
  * @param credential.credentialSubject The credentialSubject to be validated.
@@ -397,12 +392,12 @@ function extractUniqueReferences(
  * @param options Options map.
  * @param options.cTypes One or more CType definitions to be used for validation. If loadCTypes is set to false, validation will fail if the definition of the credential's CType is not given.
  * @param options.loadCTypes A function to load CType definitions that are not in cTypes. Defaults to using the {@link newCachingCTypeLoader | CachingCTypeLoader}. If set to false or undefined, no additional CTypes will be loaded.
- * 
- * @throws {Error} If the credential type does not contain a valid CType id
- * @throws {Error} If required CType definitions cannot be loaded
- * @throws {Error} If claims do not follow the expected CType format
- * @throws {Error} If referenced CTypes in nested structure cannot be fetched from the blockchain
- * @throws {Error} If validation fails against the CType schema
+ *
+ * @throws {Error} If the credential type does not contain a valid CType id.
+ * @throws {Error} If required CType definitions cannot be loaded.
+ * @throws {Error} If claims do not follow the expected CType format.
+ * @throws {Error} If referenced CTypes in nested structure cannot be fetched from the blockchain.
+ * @throws {Error} If validation fails against the CType schema.
  */
 export async function validateSubject(
   {
@@ -453,41 +448,35 @@ export async function validateSubject(
       [key.substring(vocab.length)]: value,
     }
   }, {})
-  
+
   try {
-    // Find references - if none exist, will return empty Set
     const references = extractUniqueReferences(cType)
-    
-    // Load referenced CTypes in parallel - if no references, will be empty array
+
     const referencedCTypes = await Promise.all(
       Array.from(references).map(async (ref) => {
         try {
           const referencedCType = await cachingCTypeLoader(ref as any)
           return referencedCType
         } catch (error) {
+          // eslint-disable-next-line no-console
           console.error(`Failed to fetch CType for reference ${ref}:`, error)
           throw error
         }
       })
     )
 
-    // Filter out any undefined or null values
-    const validCTypes = referencedCTypes.filter((ctype): ctype is ICType => 
-      ctype !== undefined && ctype !== null
+    const validCTypes = referencedCTypes.filter(
+      (ctype): ctype is ICType => ctype !== undefined && ctype !== null
     )
 
-    // Verify if all CTypes were fetched successfully
     if (validCTypes.length === references.size) {
-      await CType.verifyClaimAgainstNestedSchemas(
-        cType,
-        validCTypes,
-        claims
-      )
+      await CType.verifyClaimAgainstNestedSchemas(cType, validCTypes, claims)
     } else {
-      throw new Error("Some referenced CTypes could not be fetched")
+      throw new Error('Some referenced CTypes could not be fetched')
     }
   } catch (error) {
-    console.error("Validation error:", error)
+    // eslint-disable-next-line no-console
+    console.error('Validation error:', error)
     throw error
   }
 }
