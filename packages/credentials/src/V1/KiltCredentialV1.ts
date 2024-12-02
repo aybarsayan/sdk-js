@@ -7,7 +7,6 @@
 
 import { hexToU8a } from '@polkadot/util'
 import { base58Encode } from '@polkadot/util-crypto'
-import * as Kilt from "@kiltprotocol/sdk-js"
 
 import { JsonSchema, SDKErrors } from '@kiltprotocol/utils'
 import type {
@@ -328,47 +327,53 @@ export function fromInput({
 
 const cachingCTypeLoader = newCachingCTypeLoader()
 
-// Helper function to check if CType is nested
-function cTypeTypeFinder(cType: ICType): boolean {
-  function hasRef(obj: any): boolean {
-    if (typeof obj !== 'object' || obj === null) return false
-    
-    if ('$ref' in obj) return true
-    
-    return Object.values(obj).some(value => {
-      if (Array.isArray(value)) {
-        return value.some(item => hasRef(item))
-      }
-      if (typeof value === 'object') {
-        return hasRef(value)
-      }
-      return false
-    })
+// Check recursively if a value has references
+const hasRef = (value: unknown): boolean => {
+  if (typeof value !== 'object' || value === null) {
+    return false
   }
-  return hasRef(cType.properties)
+
+  if ('$ref' in (value as Record<string, unknown>)) {
+    return true
+  }
+
+  if (Array.isArray(value)) {
+    return value.some(item => hasRef(item))
+  }
+
+  return Object.values(value as Record<string, unknown>).some(v => hasRef(v))
 }
 
-// Helper function to extract unique references from CType
-function extractUniqueReferences(cType: ICType): Set<string> {
-  const references = new Set<string>()
-  
-  function processValue(value: any) {
-      if (typeof value !== 'object' || value === null) return
-      
-      if ('$ref' in value) {
-          const ref = value['$ref']
-          // Extract KILT CType reference
-          if (ref.startsWith('kilt:ctype:')) {
-              // Get first part split by #/
-              const baseRef = ref.split('#/')[0]
-              references.add(baseRef)
-          }
-      }
-      
-      // Check all values of the object recursively
-      Object.values(value).forEach(v => processValue(v))
+// Single function to both check for references and extract them
+function extractUniqueReferences(
+  cType: ICType, 
+  references: Set<string> = new Set<string>()
+): Set<string> {
+  if (typeof cType?.properties !== 'object' || cType.properties === null) {
+    return references
   }
-  
+
+  const processValue = (value: unknown): void => {
+    if (typeof value !== 'object' || value === null) {
+      return
+    }
+
+    const objValue = value as Record<string, unknown>
+    
+    if ('$ref' in objValue) {
+      const ref = objValue['$ref'] as string
+      if (ref.startsWith('kilt:ctype:')) {
+        references.add(ref.split('#/')[0])
+      }
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach(processValue)
+    } else {
+      Object.values(objValue).forEach(processValue)
+    }
+  }
+
   processValue(cType.properties)
   return references
 }
@@ -406,7 +411,7 @@ export async function validateSubject(
   }: Pick<KiltCredentialV1, 'credentialSubject' | 'type'>,
   {
     cTypes = [],
-    loadCTypes = newCachingCTypeLoader(),
+    loadCTypes = cachingCTypeLoader,
   }: { cTypes?: ICType[]; loadCTypes?: false | CTypeLoader } = {}
 ): Promise<void> {
   // get CType id referenced in credential
@@ -448,43 +453,41 @@ export async function validateSubject(
       [key.substring(vocab.length)]: value,
     }
   }, {})
-
-  // Connect to blockchain
-  const api = Kilt.ConfigService.get('api')
-
-  // Bizim eklediğimiz doğrulama mantığı
-  const isNested = cTypeTypeFinder(cType)
   
-  if (!isNested) {
-    await CType.verifyClaimAgainstNestedSchemas(
-      cType,
-      [],
-      claims
-    )
-  } else {
+  try {
+    // Find references - if none exist, will return empty Set
     const references = extractUniqueReferences(cType)
-    const referencedCTypes: ICType[] = []
     
-    for (const ref of references) {
-      try {
-        const referencedCType = await CType.fetchFromChain(ref as any)
-        if (referencedCType.cType) {
-          referencedCTypes.push(referencedCType.cType)
+    // Load referenced CTypes in parallel - if no references, will be empty array
+    const referencedCTypes = await Promise.all(
+      Array.from(references).map(async (ref) => {
+        try {
+          const referencedCType = await cachingCTypeLoader(ref as any)
+          return referencedCType
+        } catch (error) {
+          console.error(`Failed to fetch CType for reference ${ref}:`, error)
+          throw error
         }
-      } catch (error) {
-        console.error(`Failed to fetch CType for reference ${ref}:`, error)
-        throw new Error(`Failed to fetch CType from chain: ${ref}`)
-      }
-    }
+      })
+    )
 
-    if (referencedCTypes.length === references.size) {
+    // Filter out any undefined or null values
+    const validCTypes = referencedCTypes.filter((ctype): ctype is ICType => 
+      ctype !== undefined && ctype !== null
+    )
+
+    // Verify if all CTypes were fetched successfully
+    if (validCTypes.length === references.size) {
       await CType.verifyClaimAgainstNestedSchemas(
         cType,
-        referencedCTypes,
+        validCTypes,
         claims
       )
     } else {
       throw new Error("Some referenced CTypes could not be fetched")
     }
+  } catch (error) {
+    console.error("Validation error:", error)
+    throw error
   }
 }
