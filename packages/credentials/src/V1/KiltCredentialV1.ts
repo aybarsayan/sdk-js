@@ -357,7 +357,7 @@ function extractUniqueReferences(
     if (typeof value !== 'object' || value === null) {
       return
     }
-    const objValue = value as Record<string, unknown>    
+    const objValue = value as Record<string, unknown>
     if ('$ref' in objValue) {
       const ref = objValue.$ref as string
       if (ref.startsWith('kilt:ctype:')) {
