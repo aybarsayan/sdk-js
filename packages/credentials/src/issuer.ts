@@ -7,9 +7,7 @@
 
 import { SDKErrors, Signers } from '@kiltprotocol/utils'
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-import * as KiltChain from '@kiltprotocol/chain-helpers'
-// import * as Kilt from '@kiltprotocol/sdk-js'
-// import * as KiltChain from '@kiltprotocol/chain-helpers'
+import { Blockchain } from '@kiltprotocol/chain-helpers'
 import type {
   KiltAddress,
   SignerInterface,
@@ -223,7 +221,7 @@ export async function revoke(
       Txsubmitter.id
     )
 
-    const response = (await KiltChain.Blockchain.signAndSubmitTx(
+    const response = (await Blockchain.signAndSubmitTx(
       authorizedTx,
       Txsubmitter
     )) as unknown as BlockchainResponse
