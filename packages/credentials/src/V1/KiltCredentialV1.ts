@@ -327,23 +327,6 @@ export function fromInput({
 
 const cachingCTypeLoader = newCachingCTypeLoader()
 
-// Check recursively if a value has references
-const hasRef = (value: unknown): boolean => {
-  if (typeof value !== 'object' || value === null) {
-    return false
-  }
-
-  if ('$ref' in (value as Record<string, unknown>)) {
-    return true
-  }
-
-  if (Array.isArray(value)) {
-    return value.some((item) => hasRef(item))
-  }
-
-  return Object.values(value as Record<string, unknown>).some((v) => hasRef(v))
-}
-
 // Single function to both check for references and extract them
 function extractUniqueReferences(
   cType: ICType,
@@ -353,26 +336,27 @@ function extractUniqueReferences(
     return references
   }
 
-  const processValue = (value: unknown): void => {
-    if (typeof value !== 'object' || value === null) {
-      return
-    }
-    const objValue = value as Record<string, unknown>
-    if ('$ref' in objValue) {
-      const ref = objValue.$ref as string
-      if (ref.startsWith('kilt:ctype:')) {
-        references.add(ref.split('#/')[0])
-      }
-    }
+  const objValue = cType.properties as Record<string, unknown>
 
-    if (Array.isArray(value)) {
-      value.forEach(processValue)
-    } else {
-      Object.values(objValue).forEach(processValue)
+  if ('$ref' in objValue) {
+    const ref = objValue.$ref as string
+    if (ref.startsWith('kilt:ctype:')) {
+      references.add(ref.split('#/')[0])
     }
   }
 
-  processValue(cType.properties)
+  if (Array.isArray(objValue)) {
+    objValue.forEach((item) =>
+      extractUniqueReferences(item as ICType, references)
+    )
+  } else {
+    Object.values(objValue).forEach((value) => {
+      if (typeof value === 'object' && value !== null) {
+        extractUniqueReferences(value as ICType, references)
+      }
+    })
+  }
+
   return references
 }
 
@@ -409,7 +393,6 @@ export async function validateSubject(
     loadCTypes = cachingCTypeLoader,
   }: { cTypes?: ICType[]; loadCTypes?: false | CTypeLoader } = {}
 ): Promise<void> {
-  // get CType id referenced in credential
   const credentialsCTypeId = type.find((str) =>
     str.startsWith('kilt:ctype:')
   ) as ICType['$id']
@@ -417,7 +400,6 @@ export async function validateSubject(
     throw new Error('credential type does not contain a valid CType id')
   }
 
-  // check that we have access to the right schema
   let cType = cTypes?.find(({ $id }) => $id === credentialsCTypeId)
   if (!cType) {
     if (typeof loadCTypes !== 'function') {
@@ -431,7 +413,6 @@ export async function validateSubject(
     }
   }
 
-  // normalize credential subject to form expected by CType schema
   const expandedClaims: Record<string, unknown> =
     jsonLdExpandCredentialSubject(credentialSubject)
   delete expandedClaims['@id']
@@ -449,34 +430,26 @@ export async function validateSubject(
     }
   }, {})
 
-  try {
-    const references = extractUniqueReferences(cType)
+  const references = extractUniqueReferences(cType)
 
-    const referencedCTypes = await Promise.all(
-      Array.from(references).map(async (ref) => {
-        try {
-          const referencedCType = await cachingCTypeLoader(ref as any)
-          return referencedCType
-        } catch (error) {
-          // eslint-disable-next-line no-console
-          console.error(`Failed to fetch CType for reference ${ref}:`, error)
-          throw error
-        }
-      })
-    )
+  const referencedCTypes = await Promise.all(
+    Array.from(references).map(async (ref) => {
+      if (typeof loadCTypes !== 'function') {
+        throw new Error(
+          `The definition for this credential's CType ${ref} has not been passed to the validator and CType loading has been disabled`
+        )
+      }
+      return loadCTypes(ref as any)
+    })
+  )
 
-    const validCTypes = referencedCTypes.filter(
-      (ctype): ctype is ICType => ctype !== undefined && ctype !== null
-    )
+  const validCTypes = referencedCTypes.filter(
+    (ctype): ctype is ICType => ctype !== undefined && ctype !== null
+  )
 
-    if (validCTypes.length === references.size) {
-      await CType.verifyClaimAgainstNestedSchemas(cType, validCTypes, claims)
-    } else {
-      throw new Error('Some referenced CTypes could not be fetched')
-    }
-  } catch (error) {
-    // eslint-disable-next-line no-console
-    console.error('Validation error:', error)
-    throw error
+  if (validCTypes.length === references.size) {
+    await CType.verifyClaimAgainstNestedSchemas(cType, validCTypes, claims)
+  } else {
+    throw new Error('Some referenced CTypes could not be fetched')
   }
 }
