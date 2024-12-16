@@ -327,37 +327,59 @@ export function fromInput({
 
 const cachingCTypeLoader = newCachingCTypeLoader()
 
-// Single function to both check for references and extract them
-function extractUniqueReferences(
+async function loadNestedCTypeDefinitions(
   cType: ICType,
-  references: Set<string> = new Set<string>()
-): Set<string> {
-  if (typeof cType?.properties !== 'object' || cType.properties === null) {
-    return references
-  }
+  cTypeLoader: (id: string) => Promise<ICType | undefined>
+): Promise<Set<ICType>> {
+  const fetchedCTypeIds = new Set<string>()
+  const fetchedCTypeDefinitions = new Set<ICType>()
 
-  const objValue = cType.properties as Record<string, unknown>
-
-  if ('$ref' in objValue) {
-    const ref = objValue.$ref as string
-    if (ref.startsWith('kilt:ctype:')) {
-      references.add(ref.split('#/')[0])
+  async function processValue(value: unknown): Promise<void> {
+    if (typeof value !== 'object' || value === null) {
+      return
     }
-  }
 
-  if (Array.isArray(objValue)) {
-    objValue.forEach((item) =>
-      extractUniqueReferences(item as ICType, references)
-    )
-  } else {
-    Object.values(objValue).forEach((value) => {
-      if (typeof value === 'object' && value !== null) {
-        extractUniqueReferences(value as ICType, references)
+    if (Array.isArray(value)) {
+      await Promise.all(value.map(processValue))
+      return
+    }
+
+    // Check if value is an object with $ref
+    const objValue = value as Record<string, unknown>
+    if ('$ref' in objValue) {
+      const ref = objValue.$ref
+      if (typeof ref === 'string' && ref.startsWith('kilt:ctype:')) {
+        const cTypeId = ref.split('#/')[0]
+
+        if (!fetchedCTypeIds.has(cTypeId)) {
+          fetchedCTypeIds.add(cTypeId)
+          const referencedCType = await cTypeLoader(cTypeId)
+
+          if (referencedCType === undefined || referencedCType === null) {
+            throw new Error(`Failed to load referenced CType: ${cTypeId}`)
+          }
+
+          fetchedCTypeDefinitions.add(referencedCType)
+
+          const { properties } = referencedCType
+          if (properties !== undefined && properties !== null) {
+            await Promise.all(Object.values(properties).map(processValue))
+          }
+        }
       }
-    })
+      return
+    }
+
+    // Process all values in the object
+    await Promise.all(Object.values(objValue).map(processValue))
   }
 
-  return references
+  const { properties } = cType
+  if (properties !== undefined && properties !== null) {
+    await Promise.all(Object.values(properties).map(processValue))
+  }
+
+  return fetchedCTypeDefinitions
 }
 
 /**
@@ -430,24 +452,16 @@ export async function validateSubject(
     }
   }, {})
 
-  const references = extractUniqueReferences(cType)
+  // Load all nested CTypes
+  const referencedCTypes = await loadNestedCTypeDefinitions(cType, loadCTypes)
 
-  const referencedCTypes = await Promise.all(
-    Array.from(references).map(async (ref) => {
-      if (typeof loadCTypes !== 'function') {
-        throw new Error(
-          `The definition for this credential's CType ${ref} has not been passed to the validator and CType loading has been disabled`
-        )
-      }
-      return loadCTypes(ref as any)
-    })
-  )
-
-  const validCTypes = referencedCTypes.filter(
+  // Convert Set to Array and filter out any undefined or null values
+  const validCTypes = Array.from(referencedCTypes).filter(
     (ctype): ctype is ICType => ctype !== undefined && ctype !== null
   )
 
-  if (validCTypes.length === references.size) {
+  // Verify if all CTypes were fetched successfully
+  if (validCTypes.length === referencedCTypes.size) {
     await CType.verifyClaimAgainstNestedSchemas(cType, validCTypes, claims)
   } else {
     throw new Error('Some referenced CTypes could not be fetched')
