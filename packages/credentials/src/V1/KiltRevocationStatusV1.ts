@@ -9,22 +9,132 @@ import { u8aEq, u8aToHex, u8aToU8a } from '@polkadot/util'
 import { base58Decode, base58Encode } from '@polkadot/util-crypto'
 import type { ApiPromise } from '@polkadot/api'
 import type { U8aLike } from '@polkadot/util/types'
-
+import { authorizeTx } from '@kiltprotocol/did'
 import { ConfigService } from '@kiltprotocol/config'
-import type { Caip2ChainId } from '@kiltprotocol/types'
-import { Caip2, SDKErrors } from '@kiltprotocol/utils'
-
+import type {
+  Caip2ChainId,
+  KiltAddress,
+  SignerInterface,
+  MultibaseKeyPair,
+} from '@kiltprotocol/types'
+import { Caip2, SDKErrors, Signers } from '@kiltprotocol/utils'
+import { Blockchain } from '@kiltprotocol/chain-helpers'
 import * as CType from '../ctype/index.js'
 import * as Attestation from '../attestation/index.js'
 import {
   assertMatchingConnection,
   getDelegationNodeIdForCredential,
 } from './common.js'
-import type { KiltCredentialV1, KiltRevocationStatusV1 } from './types.js'
+import type { IssuerOptions } from '../interfaces.js'
+import type {
+  KiltCredentialV1,
+  KiltRevocationStatusV1,
+  VerifiableCredential,
+} from './types.js'
 
 export type Interface = KiltRevocationStatusV1
 
 export const STATUS_TYPE = 'KiltRevocationStatusV1'
+
+interface RevokeResult {
+  success: boolean
+  error?: string[]
+  info: {
+    blockNumber?: string
+    blockHash?: string
+    transactionHash?: string
+  }
+}
+
+interface BlockchainResponse {
+  blockNumber: string
+  status: {
+    finalized: string
+  }
+  txHash: string
+}
+
+/**
+ * Revokes a Kilt credential on the blockchain, making it invalid.
+ *
+ * @param params Named parameters for the revocation process.
+ * @param params.issuer Interfaces for interacting with the issuer identity.
+ * @param params.issuer.didDocument The DID Document of the issuer revoking the credential.
+ * @param params.issuer.signers Array of signer interfaces for credential authorization.
+ * @param params.issuer.submitter The submitter can be one of:
+ * - A MultibaseKeyPair for signing transactions
+ * - A Ed25519 type keypair for blockchain interactions
+ * The submitter will be used to cover transaction fees and blockchain operations.
+ * @param params.credential The Verifiable Credential to be revoked. Must contain a valid credential ID.
+ * @param issuer
+ * @param credential
+ * @returns An object containing:
+ * - success: Boolean indicating if revocation was successful
+ * - error?: Array of error messages if revocation failed
+ * - info: Object containing blockchain transaction details:
+ *   - blockNumber?: The block number where revocation was included
+ *   - blockHash?: The hash of the finalized block
+ *   - transactionHash?: The hash of the revocation transaction.
+ * @throws Will return error response if:
+ * - Credential ID is invalid or cannot be decoded
+ * - DID authorization fails
+ * - Transaction signing or submission fails.
+ */
+export async function revoke(
+  issuer: IssuerOptions,
+  credential: VerifiableCredential
+): Promise<RevokeResult> {
+  try {
+    if (!credential.id) {
+      throw new Error('Credential ID is required for revocation')
+    }
+
+    const rootHash = credential.id.split(':').pop()
+    if (!rootHash) {
+      throw new Error('Invalid credential ID format')
+    }
+
+    const decodedroothash = base58Decode(rootHash)
+    const { didDocument, signers, submitter } = issuer
+    const api = ConfigService.get('api')
+
+    const revokeTx = api.tx.attestation.revoke(decodedroothash, null) as any
+    const [Txsubmitter] = (await Signers.getSignersForKeypair({
+      keypair: submitter as MultibaseKeyPair,
+      type: 'Ed25519',
+    })) as Array<SignerInterface<'Ed25519', KiltAddress>>
+    const authorizedTx = await authorizeTx(
+      didDocument,
+      revokeTx,
+      signers as SignerInterface[],
+      Txsubmitter.id
+    )
+
+    const response = (await Blockchain.signAndSubmitTx(
+      authorizedTx,
+      Txsubmitter
+    )) as unknown as BlockchainResponse
+
+    const responseObj = JSON.parse(JSON.stringify(response))
+
+    return {
+      success: true,
+      info: {
+        blockNumber: responseObj.blockNumber,
+        blockHash: responseObj.status.finalized,
+        transactionHash: responseObj.txHash,
+      },
+    }
+  } catch (error: unknown) {
+    const errorMessage =
+      error instanceof Error ? error.message : 'Unknown error occurred'
+    return {
+      success: false,
+      error: [errorMessage],
+      info: {},
+    }
+  }
+}
 
 /**
  * Check attestation and revocation status of a credential at the latest block available.
