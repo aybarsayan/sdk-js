@@ -452,8 +452,31 @@ export async function validateSubject(
     }
   }, {})
 
+  // Create a type-safe loader function
+  const effectiveLoader = async (id: string): Promise<ICType | undefined> => {
+    // Ensure the ID is in the correct format
+    if (!id.startsWith('kilt:ctype:0x')) {
+      throw new Error(`Invalid CType ID format: ${id}`)
+    }
+
+    const typedId = id as `kilt:ctype:0x${string}`
+
+    if (typeof loadCTypes === 'function') {
+      return loadCTypes(typedId)
+    }
+    const found = cTypes.find((ct) => ct.$id === typedId)
+    if (found) {
+      return found
+    }
+    throw new Error(
+      `CType ${id} not found in provided cTypes array and CType loading is disabled`
+    )
+  }
   // Load all nested CTypes
-  const referencedCTypes = await loadNestedCTypeDefinitions(cType, loadCTypes)
+  const referencedCTypes = await loadNestedCTypeDefinitions(
+    cType,
+    effectiveLoader
+  )
 
   // Convert Set to Array and filter out any undefined or null values
   const validCTypes = Array.from(referencedCTypes).filter(
